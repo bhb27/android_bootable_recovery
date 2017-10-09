@@ -377,6 +377,8 @@ void TWPartitionManager::Output_Partition(TWPartition* Part) {
 #ifdef TARGET_RECOVERY_IS_MULTIROM
 	if (!Part->Bind_Of.empty())
 		printf("   Bind_Of: %s\n", Part->Bind_Of.c_str());
+	if (!Part->Loop_Device.empty())
+		printf("   Loop_Device: %s\n", Part->Loop_Device.c_str());
 #endif //TARGET_RECOVERY_IS_MULTIROM
 	printf("   Backup_Method: %s\n", Part->Backup_Method_By_Name().c_str());
 	if (Part->Mount_Flags || !Part->Mount_Options.empty())
@@ -1452,67 +1454,6 @@ void TWPartitionManager::Update_System_Details(void) {
 	return;
 }
 
-#ifdef TARGET_RECOVERY_IS_MULTIROM
-//TODO: merge with above code
-void TWPartitionManager::Update_Storage_Sizes()
-{
-	string current_storage_path = DataManager::GetCurrentStoragePath();
-	TWPartition* FreeStorage = Find_Partition_By_Path(current_storage_path);
-	if (FreeStorage != NULL) {
-		// Attempt to mount storage
-		if (!FreeStorage->Mount(false)) {
-			gui_msg(Msg(msg::kError, "unable_to_mount_storage=Unable to mount storage"));
-			DataManager::SetValue(TW_STORAGE_FREE_SIZE, 0);
-		} else {
-			DataManager::SetValue(TW_STORAGE_FREE_SIZE, (int)(FreeStorage->Free / 1048576LLU));
-		}
-	} else {
-		LOGINFO("Unable to find storage partition '%s'.\n", current_storage_path.c_str());
-	}
-/* OLD CODE--
-	string current_storage_path = DataManager::GetCurrentStoragePath();
-	TWPartition* FreeStorage = Find_Partition_By_Path(current_storage_path);
-	if (FreeStorage != NULL) {
-		// Attempt to mount storage
-		if (!FreeStorage->Mount(false)) {
-			// We couldn't mount storage... check to see if we have dual storage
-			int has_dual_storage;
-			DataManager::GetValue(TW_HAS_DUAL_STORAGE, has_dual_storage);
-			if (has_dual_storage == 1) {
-				// We have dual storage, see if we're using the internal storage that should always be present
-				if (current_storage_path == DataManager::GetSettingsStoragePath()) {
-					if (!FreeStorage->Is_Encrypted) {
-						// Not able to use internal, so error!
-						LOGERR("Unable to mount internal storage.\n");
-					}
-					DataManager::SetValue(TW_STORAGE_FREE_SIZE, 0);
-				} else {
-					// We were using external, flip to internal
-					DataManager::SetValue(TW_USE_EXTERNAL_STORAGE, 0);
-					current_storage_path = DataManager::GetCurrentStoragePath();
-					FreeStorage = Find_Partition_By_Path(current_storage_path);
-					if (FreeStorage != NULL) {
-						DataManager::SetValue(TW_STORAGE_FREE_SIZE, (int)(FreeStorage->Free / 1048576LLU));
-					} else {
-						LOGERR("Unable to locate internal storage partition.\n");
-						DataManager::SetValue(TW_STORAGE_FREE_SIZE, 0);
-					}
-				}
-			} else {
-				// No dual storage and unable to mount storage, error!
-				LOGERR("Unable to mount storage.\n");
-				DataManager::SetValue(TW_STORAGE_FREE_SIZE, 0);
-			}
-		} else {
-			DataManager::SetValue(TW_STORAGE_FREE_SIZE, (int)(FreeStorage->Free / 1048576LLU));
-		}
-	} else {
-		LOGINFO("Unable to find storage partition '%s'.\n", current_storage_path.c_str());
-	}
-*/
-}
-#endif //TARGET_RECOVERY_IS_MULTIROM
-
 void TWPartitionManager::Post_Decrypt(const string& Block_Device) {
 	TWPartition* dat = Find_Partition_By_Path("/data");
 	if (dat != NULL) {
@@ -1790,6 +1731,10 @@ void TWPartitionManager::Mount_All_Storage(void) {
 void TWPartitionManager::UnMount_Main_Partitions(void) {
 	// Unmounts system and data if data is not data/media
 	// Also unmounts boot if boot is mountable
+#ifdef TARGET_RECOVERY_IS_MULTIROM
+	if(DataManager::GetIntValue("multirom_do_backup") == 1)
+		return;
+#endif
 	LOGINFO("Unmounting main partitions...\n");
 
 	TWPartition* Boot_Partition = Find_Partition_By_Path("/boot");

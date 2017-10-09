@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <linux/capability.h>
 #include <linux/xattr.h>
+#include <linux/loop.h>
 #include <sys/xattr.h>
 #include <sys/vfs.h>
 #include <mntent.h>
@@ -616,59 +617,66 @@ void MultiROM::deinitBackup()
 	}
 }
 
+static bool Paths_Exist(const string& BasePath, string Path1 = "", string Path2 = "", string Path3 = "") {
+	bool res;
+	res = (access(BasePath.c_str(), F_OK) >= 0);
+	if (res && !Path1.empty()) res = (access((BasePath + Path1).c_str(), F_OK) >= 0);
+	if (res && !Path2.empty()) res = (access((BasePath + Path2).c_str(), F_OK) >= 0);
+	if (res && !Path3.empty()) res = (access((BasePath + Path3).c_str(), F_OK) >= 0);
+	return res;
+}
+
 int MultiROM::getType(std::string name)
 {
 	std::string path = getRomsPath() + "/" + name + "/";
-	if(getRomsPath().find("/mnt") != 0) // Internal memory
+	if (getRomsPath().find("/mnt") != 0) // Internal memory
 	{
-		if(name == INTERNAL_NAME)
+		if (name == INTERNAL_NAME)
 			return ROM_INTERNAL_PRIMARY;
 
-		if (access((path + "system").c_str(), F_OK) >= 0 &&
-			access((path + "data").c_str(), F_OK) >= 0 &&
-			access((path + "cache").c_str(), F_OK) >= 0)
-		{
-			if(access((path + "boot").c_str(), F_OK) >= 0)
+		if (Paths_Exist(path, "system", "data", "cache")) {
+			if (Paths_Exist(path, "boot"))
 				return ROM_ANDROID_INTERNAL;
 			else
 				return ROM_UTOUCH_INTERNAL;
 		}
 
-		if (access((path + "data").c_str(), F_OK) >= 0 &&
-			access((path + "rom_info.txt").c_str(), F_OK) >= 0)
-		{
-			return ROM_SAILFISH_INTERNAL;
-		}
+		if (Paths_Exist(path, "boot", "system.sparse.img") &&
+			(Paths_Exist(path, "data") || Paths_Exist(path, "data.sparse.img")) &&
+			(Paths_Exist(path, "cache") || Paths_Exist(path, "cache.sparse.img")))
+			return ROM_ANDROID_INTERNAL_HYBRID;
 
-		if(access((path + "root").c_str(), F_OK) >= 0)
+		if (Paths_Exist(path, "data", "rom_info.txt"))
+			return ROM_SAILFISH_INTERNAL;
+
+		if (Paths_Exist(path, "root"))
 			return ROM_UBUNTU_INTERNAL;
 	}
 	else // USB roms
 	{
-		if (access((path + "system").c_str(), F_OK) >= 0 &&
-			access((path + "data").c_str(), F_OK) >= 0 &&
-			access((path + "cache").c_str(), F_OK) >= 0)
-		{
-			if(access((path + "boot").c_str(), F_OK) >= 0)
+		if (Paths_Exist(path, "system", "data", "cache")) {
+			if (Paths_Exist(path, "boot"))
 				return ROM_ANDROID_USB_DIR;
 			else
 				return ROM_UTOUCH_USB_DIR;
 		}
 
-		if (access((path + "system.img").c_str(), F_OK) >= 0 &&
-			access((path + "data.img").c_str(), F_OK) >= 0 &&
-			access((path + "cache.img").c_str(), F_OK) >= 0)
-		{
-			if(access((path + "boot").c_str(), F_OK) >= 0)
+		if (Paths_Exist(path, "system.img", "data.img", "cache.img")) {
+			if (Paths_Exist(path, "boot"))
 				return ROM_ANDROID_USB_IMG;
 			else
 				return ROM_UTOUCH_USB_IMG;
 		}
 
-		if(access((path + "root").c_str(), F_OK) >= 0)
+		if (Paths_Exist(path, "boot", "system.sparse.img") &&
+			(Paths_Exist(path, "data") || Paths_Exist(path, "data.sparse.img")) &&
+			(Paths_Exist(path, "cache") || Paths_Exist(path, "cache.sparse.img")))
+			return ROM_ANDROID_USB_HYBRID;
+
+		if (Paths_Exist(path, "root"))
 			return ROM_UBUNTU_USB_DIR;
 
-		if(access((path + "root.img").c_str(), F_OK) >= 0)
+		if (Paths_Exist(path, "root.img"))
 			return ROM_UBUNTU_USB_IMG;
 	}
 	return ROM_UNKNOWN;
@@ -815,6 +823,53 @@ void MultiROM::saveConfig(const MultiROM::config& cfg)
 	fclose(f);
 }
 
+static bool MakeMultiROMRecoveryFstab(void)
+{
+	FILE *fstabIN;
+	FILE *fstabOUT;
+	char fstab_line[MAX_FSTAB_LINE_LENGTH];
+
+	if (rename("/etc/recovery.fstab", "/etc/recovery.fstab.bak") < 0) {
+		LOGERR("Could not rename /etc/recovery.fstab to /etc.recovery.fstab.bak!\n");
+		return false;
+	}
+
+	fstabIN = fopen("/etc/recovery.fstab.bak", "rt");
+	if (!fstabIN) {
+		LOGERR("Could not open /etc/recovery.fstab.bak for reading!\n");
+		return false;
+	}
+
+	fstabOUT = fopen("/etc/recovery.fstab", "w");
+	if (!fstabOUT) {
+		LOGERR("Could not open /etc/recovery.fstab for writing!\n");
+		fclose(fstabIN);
+		return false;
+	}
+
+	while (fgets(fstab_line, sizeof(fstab_line), fstabIN) != NULL) {
+		if (fstab_line[strlen(fstab_line) - 1] != '\n')
+			fstab_line[strlen(fstab_line)] = '\n';
+
+		if (strncmp(fstab_line, "/cache", 6) == 0 && strchr(" \t\n", fstab_line[6]))
+			continue;
+
+		if (strncmp(fstab_line, "/system", 7) == 0 && strchr(" \t\n", fstab_line[7]))
+			continue;
+
+		if (strncmp(fstab_line, "/data", 5) == 0 && strchr(" \t\n", fstab_line[5]))
+			continue;
+
+		fputs(fstab_line, fstabOUT);
+
+		memset(fstab_line, 0, sizeof(fstab_line));
+	}
+	fclose(fstabIN);
+	fclose(fstabOUT);
+
+	return true;
+}
+
 bool MultiROM::changeMounts(std::string name)
 {
 	gui_print("Changing mounts to ROM %s...\n", name.c_str());
@@ -835,18 +890,21 @@ bool MultiROM::changeMounts(std::string name)
 
 	TWPartition *realdata, *data, *sys, *cache;
 	std::vector<TWPartition*>& parts = PartitionManager.getPartitions();
-	for(std::vector<TWPartition*>::iterator itr = parts.begin(); itr != parts.end();)
-	{
-		if((*itr)->Mount_Point == "/system" || (*itr)->Mount_Point == "/cache")
-		{
+	for(std::vector<TWPartition*>::iterator itr = parts.begin(); itr != parts.end();) {
+		if ((*itr)->Mount_Point == "/system") {
 			(*itr)->UnMount(true);
 			delete *itr;
 			itr = parts.erase(itr);
 		}
-		else
-		{
-			if((*itr)->Mount_Point == "/data")
+		else if ((*itr)->Mount_Point == "/cache") {
+			(*itr)->UnMount(true);
+			delete *itr;
+			itr = parts.erase(itr);
+		}
+		else {
+			if((*itr)->Mount_Point == "/data") {
 				data = *itr;
+			}
 			++itr;
 		}
 	}
@@ -898,17 +956,32 @@ bool MultiROM::changeMounts(std::string name)
 	}
 
 	const char *fs = realdata->Fstab_File_System.c_str();
-	if(!(M(type) & MASK_IMAGES))
+	if ((M(type) & MASK_HYBRID))
 	{
-		data = TWPartition::makePartFromFstab("/data_t %s %s/data flags=bindof=/realdata\n", fs, base.c_str());
-		sys = TWPartition::makePartFromFstab("/system %s %s/system flags=bindof=/realdata\n", fs, base.c_str());
+		// In hybrid mode the system partition is always an img file
+		sys = TWPartition::makePartFromFstab("/system %s %s/system.sparse.img flags=imagemount\n", fs, base.c_str());
+
+		if (Paths_Exist(base, "/cache.sparse.img"))
+			cache = TWPartition::makePartFromFstab("/cache %s %s/cache.sparse.img flags=imagemount\n", fs, base.c_str());
+		else
+			cache = TWPartition::makePartFromFstab("/cache %s %s/cache flags=bindof=/realdata\n", fs, base.c_str());
+
+		if (Paths_Exist(base, "/data.sparse.img"))
+			data = TWPartition::makePartFromFstab("/data_t %s %s/data.sparse.img flags=imagemount\n", fs, base.c_str());
+		else
+			data = TWPartition::makePartFromFstab("/data_t %s %s/data flags=bindof=/realdata\n", fs, base.c_str());
+	}
+	else if (!(M(type) & MASK_IMAGES))
+	{
 		cache = TWPartition::makePartFromFstab("/cache %s %s/cache flags=bindof=/realdata\n", fs, base.c_str());
+		sys = TWPartition::makePartFromFstab("/system %s %s/system flags=bindof=/realdata\n", fs, base.c_str());
+		data = TWPartition::makePartFromFstab("/data_t %s %s/data flags=bindof=/realdata\n", fs, base.c_str());
 	}
 	else
 	{
-		data = TWPartition::makePartFromFstab("/data_t %s %s/data.img flags=imagemount\n", fs, base.c_str());
-		sys = TWPartition::makePartFromFstab("/system %s %s/system.img flags=imagemount\n", fs, base.c_str());
 		cache = TWPartition::makePartFromFstab("/cache %s %s/cache.img flags=imagemount\n", fs, base.c_str());
+		sys = TWPartition::makePartFromFstab("/system %s %s/system.img flags=imagemount\n", fs, base.c_str());
+		data = TWPartition::makePartFromFstab("/data_t %s %s/data.img flags=imagemount\n", fs, base.c_str());
 	}
 
 	// Workaround TWRP̈́'s datamedia code
@@ -917,9 +990,9 @@ bool MultiROM::changeMounts(std::string name)
 	data->Backup_Path = data->Mount_Point = "/data";
 	data->Can_Be_Backed_Up = true;
 
-	parts.push_back(data);
-	parts.push_back(sys);
 	parts.push_back(cache);
+	parts.push_back(sys);
+	parts.push_back(data);
 
 	if(DataManager::GetStrValue("tw_storage_path").find("/data/media") == 0)
 	{
@@ -929,14 +1002,13 @@ bool MultiROM::changeMounts(std::string name)
 	}
 
 	PartitionManager.Update_System_Details();
-	PartitionManager.Output_Partition_Logging();
 
-	if(!data->Mount(true) || !sys->Mount(true) || !cache->Mount(true))
+	if(!cache->Mount(true) || !sys->Mount(true) || !data->Mount(true))
 	{
 		gui_print("Failed to mount fake partitions, canceling!\n");
-		data->UnMount(false);
-		sys->UnMount(false);
 		cache->UnMount(false);
+		sys->UnMount(false);
+		data->UnMount(false);
 		realdata->UnMount(false);
 		PartitionManager.Pop_Context();
 		PartitionManager.Update_System_Details();
@@ -945,9 +1017,11 @@ bool MultiROM::changeMounts(std::string name)
 		return false;
 	}
 
+	PartitionManager.Output_Partition_Logging();
+
 	// SuperSU tries *very* hard to mount /data and /system, even looks through
 	// recovery.fstab and manages to mount the real /system
-	system("mv /etc/recovery.fstab /etc/recovery.fstab.bak");
+	MakeMultiROMRecoveryFstab();
 
 	// This shim prevents everything from mounting anything as read-only
 	// and also disallow mounting/unmounting of /system /data /cache
@@ -1008,7 +1082,6 @@ void MultiROM::restoreMounts()
 	std::string list_loop_devices;
 	std::stringstream ss;
 	std::string line;
-	int rc;
 	int i;
 
 	// Disassociate and unmount 'leftover' loop mounts (su, magisk, etc.)
@@ -1022,7 +1095,9 @@ void MultiROM::restoreMounts()
 
 		std::string loop_dev = line.substr(0, pos);
 		std::string base_name = TWFunc::Get_Filename(line);
-		if (base_name != "boot.img" && base_name != "cache.img" && base_name != "system.img" && base_name != "data.img") {
+		if (base_name != "boot.img" &&
+		    base_name != "cache.img" && base_name != "system.img" && base_name != "data.img" &&
+		    base_name != "cache.sparse.img" && base_name != "system.sparse.img" && base_name != "data.sparse.img") {
 			FILE *f;
 			struct mntent *ent;
 
@@ -1033,30 +1108,29 @@ void MultiROM::restoreMounts()
 				while ((ent = getmntent(f))) {
 					if (loop_dev == ent->mnt_fsname) {
 						LOGINFO("Loop device %s (%s) is still mounted on %s!\n", loop_dev.c_str(), base_name.c_str(), ent->mnt_dir);
-						rc = KillProcessesUsingPath(ent->mnt_dir);
-						LOGINFO("KillProcessesUsingPath %s (rc=%d)\n", ent->mnt_dir, rc);
-						rc = umount(ent->mnt_dir);
-						LOGINFO("Unmounting %s (rc=%d)\n", ent->mnt_dir, rc);
+						KillProcessesUsingPath(ent->mnt_dir);
+						if (umount(ent->mnt_dir) < 0)
+							LOGINFO("Failed to unmount '%s'\n", ent->mnt_dir);
+						else
+							LOGINFO("Unmounted '%s'\n", ent->mnt_dir);
 					}
 				}
 				endmntent(f);
 			}
-			rc = TWFunc::Exec_Cmd("losetup " + loop_dev + " 2>/dev/null; if [ $? == 0 ]; then losetup -d " + loop_dev + "; fi");
-			LOGINFO("Releasing %s (%s) (rc=%d)\n", loop_dev.c_str(), base_name.c_str(), rc);
+			if (TWFunc::Exec_Cmd("losetup " + loop_dev + " 2>/dev/null; if [ $? == 0 ]; then losetup -d " + loop_dev + "; fi") != 0)
+				LOGINFO("Unable to disassociate loop device %s (%s)\n", loop_dev.c_str(), base_name.c_str());
+			else
+				LOGINFO("Released %s (%s)\n", loop_dev.c_str(), base_name.c_str());
 		}
 	}
 
 	sync();
 
 	// Is this really needed and entirely safe
-	rc = KillProcessesUsingPath("/cache");
-	LOGINFO("KillProcessesUsingPath /cache (rc=%d)\n", rc);
+	KillProcessesUsingPath("/cache");
 	KillProcessesUsingPath("/system");
-	LOGINFO("KillProcessesUsingPath /system (rc=%d)\n", rc);
 	KillProcessesUsingPath("/data");
-	LOGINFO("KillProcessesUsingPath /data (rc=%d)\n", rc);
 	KillProcessesUsingPath("/realdata");
-	LOGINFO("KillProcessesUsingPath /realdata (rc=%d)\n", rc);
 
 	sync();
 
@@ -1069,18 +1143,18 @@ void MultiROM::restoreMounts()
 
 		if (PartitionManager.Is_Mounted_By_Path("/cache")) {
 			mounted_count++;
-			rc = PartitionManager.UnMount_By_Path("/cache", false);
-			LOGINFO("Unmounting /cache (rc=%d)\n", rc);
+			if (PartitionManager.UnMount_By_Path("/cache", false))
+				LOGINFO("Unmounted fake /cache partition\n");
 		}
 		if (PartitionManager.Is_Mounted_By_Path("/system")) {
 			mounted_count++;
-			rc = PartitionManager.UnMount_By_Path("/system", false);
-			LOGINFO("Unmounting /system (rc=%d)\n", rc);
+			if (PartitionManager.UnMount_By_Path("/system", false))
+				LOGINFO("Unmounted fake /system partition\n");
 		}
 		if (PartitionManager.Is_Mounted_By_Path("/data")) {
 			mounted_count++;
-			rc = PartitionManager.UnMount_By_Path("/data", false);
-			LOGINFO("Unmounting /data (rc=%d)\n", rc);
+			if (PartitionManager.UnMount_By_Path("/data", false))
+				LOGINFO("Unmounted fake /data partition\n");
 		}
 
 		if (mounted_count == 0)
@@ -1090,8 +1164,8 @@ void MultiROM::restoreMounts()
 	if (mounted_count == 0) {
 		if (PartitionManager.Is_Mounted_By_Path("/realdata")) {
 			mounted_count++;
-			rc = PartitionManager.UnMount_By_Path("/realdata", false);
-			LOGINFO("Unmounting /realdata (rc=%d)\n", rc);
+			if (PartitionManager.UnMount_By_Path("/realdata", false))
+				LOGINFO("Unmounted /realdata partition\n");
 		}
 	} else {
 		// One of the fake partitions couldn't be unmounted so restoring
@@ -1112,8 +1186,10 @@ void MultiROM::restoreMounts()
 
 		std::string loop_dev = line.substr(0, pos);
 		std::string base_name = TWFunc::Get_Filename(line);
-		rc = TWFunc::Exec_Cmd("losetup -d " + loop_dev);
-		LOGINFO("Releasing %s (%s) rc=%d\n", loop_dev.c_str(), base_name.c_str(), rc);
+		if (TWFunc::Exec_Cmd("losetup -d " + loop_dev) != 0)
+			LOGINFO("Unable to disassociate loop device %s (%s)\n", loop_dev.c_str(), base_name.c_str());
+		else
+			LOGINFO("Released %s (%s)\n", loop_dev.c_str(), base_name.c_str());
 	}
 
 	rmdir(REALDATA);
@@ -1220,87 +1296,19 @@ bool MultiROM::createFakeSystemImg()
 		return false;
 	}
 
-	// Note: losetup -f is not always reliable, it should give the next available free loop
-	//       device, but it actually gives the next available number, even if it doesn't exist
-	#define LOSETUP_F "LOOP_DEV=$(losetup -f); if [ $? = 0 ] && [ -e $LOOP_DEV ]; then echo $LOOP_DEV; true; else false; fi;"
-
-	// First check for existence of any free loop device
-	std::string loop_device;
-	if(TWFunc::Exec_Cmd(LOSETUP_F, loop_device) != 0)
-	{
-		system_args("rm \"%s/system.img\"", sysimg.c_str());
-		LOGERR("Failed to find free loop device\n");
-		return false;
-	}
-
-	// systemless SuperSU uses loop0 or loop1 only, perhaps other mods as well, so let's skip those
-	// we could actually set this to a/the highest number and let it use the last available loop device
-	// or alternatively create our own loop device like the boot.img commit
-	#define NUM_OF_LOOP_DEVICE_TO_SKIP   2
-
-	std::string skipped_loop_device[NUM_OF_LOOP_DEVICE_TO_SKIP];
-	int i = 0;
-
-	// Now try and skip N loop devices
-	int fd = creat("/tmp/skip_dummy", 0644);
-	if(fd < 0)
-	{
-		gui_print("Failed to create dummy file for loop device skips file (%s)!\n", strerror(errno));
-	}
-	else
-	{
-		close(fd);
-
-		do
-		{
-			if(TWFunc::Exec_Cmd(LOSETUP_F, skipped_loop_device[i]) != 0)
-			{
-				LOGINFO("No more free loop devices at %d\n", i);
-				skipped_loop_device[i].clear();
-				if(i > 0) // release previous loop device
-				{
-					system_args("losetup -d \"%s\"", skipped_loop_device[i-1].c_str());
-					skipped_loop_device[i-1].clear();
-				}
-				break;
-			}
-			else
-			{
-				TWFunc::trim(skipped_loop_device[i]);
-				LOGINFO("Skipping loop device %s\n", skipped_loop_device[i].c_str());
-				system_args("losetup \"%s\" /tmp/skip_dummy", skipped_loop_device[i].c_str());
-			}
-		} while(++i < NUM_OF_LOOP_DEVICE_TO_SKIP);
-		system_args("rm /tmp/skip_dummy");
-	}
-
-	// And back to the original code (the below will not fail because we tested above)
-	loop_device.clear();
-	if(TWFunc::Exec_Cmd(LOSETUP_F, loop_device) != 0)
-	{
-		system_args("rm \"%s/system.img\"", sysimg.c_str());
-		LOGERR("Failed to find free loop device\n");
-		i = NUM_OF_LOOP_DEVICE_TO_SKIP; while(i--) if(!skipped_loop_device[i].empty()) system_args("losetup -d \"%s\"", skipped_loop_device[i].c_str());
-		return false;
-	}
-
-	TWFunc::trim(loop_device);
-
-	if(system_args("losetup \"%s\" \"%s/system.img\"", loop_device.c_str(), sysimg.c_str()) != 0)
+	std::string loop_device = Create_LoopDevice(sysimg + "/system.img");
+	if (loop_device.empty())
 	{
 		system_args("rm \"%s/system.img\"", sysimg.c_str());
 		LOGERR("Failed to setup loop device!\n");
-		i = NUM_OF_LOOP_DEVICE_TO_SKIP; while(i--) if(!skipped_loop_device[i].empty()) system_args("losetup -d \"%s\"", skipped_loop_device[i].c_str());
 		return false;
 	}
-
-	// Finally release skipped loop devices
-	i = NUM_OF_LOOP_DEVICE_TO_SKIP; while(i--) if(!skipped_loop_device[i].empty()) system_args("losetup -d \"%s\"", skipped_loop_device[i].c_str());
 
 	if(system_args("mv \"%s\" \"%s-orig\" && ln -s \"%s\" \"%s\"",
 		sys->Actual_Block_Device.c_str(), sys->Actual_Block_Device.c_str(), loop_device.c_str(), sys->Actual_Block_Device.c_str()) != 0)
 	{
-		system_args("losetup -d \"%s\"; rm -f \"%s/system.img\"", loop_device.c_str(), sysimg.c_str());
+		Release_LoopDevice(loop_device, true);
+		system_args("rm -f \"%s/system.img\"", sysimg.c_str());
 		LOGERR("Failed to fake system device!\n");
 		return false;
 	}
@@ -1968,6 +1976,41 @@ bool MultiROM::createImagesFromBase(const std::string& base)
 	return true;
 }
 
+bool MultiROM::createSparseImage(const std::string& base, const char *img)
+{
+	gui_print("Creating %s.sparse.img...\n", img);
+
+	int max_size_MB = 0;
+	std::string path = "/"; path += img;
+	TWPartition *part = PartitionManager.Find_Partition_By_Path(path);
+	if (part) {
+		max_size_MB = part->GetSizeRaw() / 1024 / 1024;
+		if(max_size_MB <= 0) {
+			gui_print("Failed to create %s image: invalid size (%dMB)\n", img, max_size_MB);
+			return false;
+		}
+	} else {
+		gui_print("Failed to get real partition information (%s)!\n", img);
+		return false;
+	}
+
+	// make sparse files and format it ext4
+	char cmd[256];
+
+	// make_ext4fs errors out if it has unknown path
+	if(TWFunc::Path_Exists("/file_contexts") &&
+		(!strcmp(img, "data") ||
+		 !strcmp(img, "system") ||
+		 !strcmp(img, "cache"))) {
+		snprintf(cmd, sizeof(cmd), "make_ext4fs -l %dM -a \"/%s\" -S /file_contexts \"%s/%s.sparse.img\"", max_size_MB, img, base.c_str(), img);
+	} else {
+		snprintf(cmd, sizeof(cmd), "make_ext4fs -l %dM \"%s/%s.img\"", max_size_MB, base.c_str(), img);
+	}
+
+	LOGINFO("Creating sparse image with cmd: %s\n", cmd);
+	return system(cmd) == 0;
+}
+
 bool MultiROM::createDirsFromBase(const string& base)
 {
 	for(baseFolders::const_iterator itr = m_base_folders.begin(); itr != m_base_folders.end(); ++itr)
@@ -2029,6 +2072,41 @@ bool MultiROM::createDirs(std::string name, int type)
 
 			if(!createImagesFromBase(base))
 				return false;
+			break;
+		case ROM_ANDROID_INTERNAL_HYBRID:
+		case ROM_ANDROID_USB_HYBRID:
+			if (mkdir((base + "/boot").c_str(), 0777) < 0) {
+				gui_print("Failed to create android folders!\n");
+				return false;
+			}
+
+			if (!createSparseImage(base, "system"))
+				return false;
+			system_args("chcon u:object_r:system_file:s0 \"%s/system.sparse.img\"", base.c_str());
+
+			if (1) {
+				if (mkdir((base + "/data").c_str(), 0771) < 0) {
+					gui_print("Failed to create android folders!\n");
+					return false;
+				}
+				system_args("chcon u:object_r:system_data_file:s0 \"%s/data\"", base.c_str());
+			} else {
+				if (!createSparseImage(base, "data"))
+					return false;
+				system_args("chcon u:object_r:system_data_file:s0 \"%s/data.sparse.img\"", base.c_str());
+			}
+
+			if (1) {
+				if (mkdir((base + "/cache").c_str(), 0770) < 0) {
+					gui_print("Failed to create android folders!\n");
+					return false;
+				}
+				system_args("chcon u:object_r:system_data_file:s0 \"%s/cache\"", base.c_str());
+			} else {
+				if (!createSparseImage(base, "cache"))
+					return false;
+				system_args("chcon u:object_r:cache_file:s0 \"%s/cache\"", base.c_str());
+			}
 			break;
 		case ROM_UBUNTU_INTERNAL:
 		case ROM_UBUNTU_USB_DIR:
@@ -2270,9 +2348,15 @@ int MultiROM::getType(int os, std::string loc)
 	{
 		case 1: // android
 			if(loc == INTERNAL_MEM_LOC_TXT)
-				return ROM_ANDROID_INTERNAL;
+				if (DataManager::GetIntValue("tw_multirom_type_SparseSystem") == 0)
+					return ROM_ANDROID_INTERNAL;
+				else
+					return ROM_ANDROID_INTERNAL_HYBRID;
 			else if(!images)
-				return ROM_ANDROID_USB_DIR;
+				if (DataManager::GetIntValue("tw_multirom_type_SparseSystem") == 0)
+					return ROM_ANDROID_USB_DIR;
+				else
+					return ROM_ANDROID_USB_HYBRID;
 			else
 				return ROM_ANDROID_USB_IMG;
 			break;
@@ -2348,7 +2432,9 @@ bool MultiROM::addROM(std::string zip, int os, std::string loc)
 	switch(type)
 	{
 		case ROM_ANDROID_INTERNAL:
+		case ROM_ANDROID_INTERNAL_HYBRID:
 		case ROM_ANDROID_USB_DIR:
+		case ROM_ANDROID_USB_HYBRID:
 		case ROM_ANDROID_USB_IMG:
 		{
 			std::string src = DataManager::GetStrValue("tw_multirom_add_source");
@@ -2534,7 +2620,7 @@ bool MultiROM::installFromBackup(std::string name, std::string path, int type)
 {
 	struct stat info;
 	std::string base = getRomsPath() + "/" + name;
-	int has_system = 0, has_data = 0;
+	int has_system = 0, has_system_image = 0, has_data = 0;
 
 	if(stat((path + "/boot.emmc.win").c_str(), &info) < 0)
 	{
@@ -2554,14 +2640,16 @@ bool MultiROM::installFromBackup(std::string name, std::string path, int type)
 	{
 		if(strstr(dr->d_name, "system.") == dr->d_name)
 			has_system = 1;
+		else if(strstr(dr->d_name, "system_image.emmc.win") == dr->d_name)
+			has_system_image = 1;
 		else if(strstr(dr->d_name, "data.") == dr->d_name)
 			has_data = 1;
 	}
 	closedir(d);
 
-	if(!has_system)
+	if(!has_system && !has_system_image)
 	{
-		gui_print("Backup must contain system image!\n");
+		gui_print("Backup must contain System or System_Image!\n");
 		return false;
 	}
 
@@ -2588,12 +2676,42 @@ bool MultiROM::installFromBackup(std::string name, std::string path, int type)
 	DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, 0);
 
 	// tw_restore_selected (aka Restore_List) used by Run_Restore has the format = '/boot;/cache;/system;/data;/recovery;'
-	if (!has_data)
-		DataManager::SetValue("tw_restore_selected", "/system;");
-	else
-		DataManager::SetValue("tw_restore_selected", "/system;/data;");
+	if (has_system)
+	{
+		// Favor System_Files even if there is a System_Image
+		if (!has_data)
+			DataManager::SetValue("tw_restore_selected", "/system;");
+		else
+			DataManager::SetValue("tw_restore_selected", "/system;/data;");
 
-	res = PartitionManager.Run_Restore(path);
+		res = PartitionManager.Run_Restore(path);
+	}
+	else
+	{
+		// System_Image
+		if (mkdir("/tmp/system", 777) == 0) {
+			std::string cmd = "mount -o loop,noatime,ro -t auto";
+			cmd += " \"" + path + "/system_image.emmc.win\"";
+			cmd += " /tmp/system";
+
+			int is_mounted = (TWFunc::Exec_Cmd(cmd) == 0);
+
+			if (is_mounted) {
+				res = copyPartWithXAttrs("/tmp", "", "system", false);
+				umount("/tmp/system");
+				if (res && has_data)
+				{
+					DataManager::SetValue("tw_restore_selected", "/data;");
+					res = PartitionManager.Run_Restore(path);
+				}
+			}
+			else
+				gui_print("Failed to mount System_Image!\n");
+			rmdir("/tmp/system");
+		}
+		else
+			gui_print("Failed to create temporary mountpoint!\n");
+	}
 
 	restoreMounts();
 	return res;
@@ -2941,16 +3059,16 @@ int MultiROM::system_args(const char *fmt, ...)
 	ret = vsnprintf(cmd, sizeof(cmd), fmt, ap);
 	if(ret < (int)sizeof(cmd))
 	{
-		LOGINFO("Running cmd \"%s\"\n", cmd);
 		ret = system(cmd);
+		LOGINFO("Running cmd \"%s\" ended with RC=%d\n", cmd, ret);
 	}
 	else
 	{
 		char *buff = new char[ret+1];
 		vsnprintf(buff, ret+1, fmt, ap);
 
-		LOGINFO("Running cmd \"%s\"\n", buff);
 		ret = system(buff);
+		LOGINFO("Running cmd \"%s\" ended with RC=%d\n", buff, ret);
 
 		delete[] buff;
 	}
@@ -2961,17 +3079,14 @@ int MultiROM::system_args(const char *fmt, ...)
 
 bool MultiROM::fakeBootPartition(const char *fakeImg)
 {
-	if(access((m_boot_dev + "-orig").c_str(), F_OK) >= 0)
-	{
+	if (access((m_boot_dev + "-orig").c_str(), F_OK) >= 0) {
 		gui_print("Failed to fake boot partition, %s-orig already exists!\n", m_boot_dev.c_str());
 		return false;
 	}
 
-	if(access(fakeImg, F_OK) < 0)
-	{
+	if (access(fakeImg, F_OK) < 0) {
 		int fd = creat(fakeImg, 0644);
-		if(fd < 0)
-		{
+		if (fd < 0) {
 			gui_print("Failed to create fake boot image file %s (%s)!\n", fakeImg, strerror(errno));
 			return false;
 		}
@@ -2981,8 +3096,7 @@ bool MultiROM::fakeBootPartition(const char *fakeImg)
 		system_args("dd if=\"%s\" of=\"%s\"", m_boot_dev.c_str(), fakeImg);
 		gui_print("Current boot sector was used as base for fake boot.img!\n");
 	}
-	else
-	{
+	else {
 		#ifdef BOARD_BOOTIMAGE_PARTITION_SIZE
 			LOGINFO("Truncating fake boot.img to %d bytes\n", BOARD_BOOTIMAGE_PARTITION_SIZE);
 			truncate(fakeImg, BOARD_BOOTIMAGE_PARTITION_SIZE);
@@ -2997,22 +3111,17 @@ bool MultiROM::fakeBootPartition(const char *fakeImg)
 
 	#else
 
-	#define BOOTIMG_LOOP_MINOR 222   // just chose 222 randomly
-	int major = 7;                   // MAJOR = grep loop /proc/devices (it's always 7)
-	int minor = BOOTIMG_LOOP_MINOR;  // MINOR = non-existent /dev/block/loopN
-
-	// create a new loop block device and setup loop
-	if(major && minor && (system_args("mknod \"%s\" b %d %d && losetup \"%s\" \"%s\"", m_boot_dev.c_str(), major, minor, m_boot_dev.c_str(), fakeImg) == 0))
-	{
+	std::string loop_device = Create_LoopDevice(fakeImg);
+	if (!loop_device.empty()) {
+		system_args("mv \"%s\" \"%s\"", loop_device.c_str(), m_boot_dev.c_str()); // rename it to the real boot partition
+		system_args("touch \"%s\"", loop_device.c_str()); // create a dummy entry so this loop device won't be used
 		gui_print("Created loop block device for boot.img!\n");
 	}
-	else
-	{
+	else {
 		gui_print("Failed to create loop block device, falling back to normal symlink!\n");
 		system_args("rm \"%s\"", m_boot_dev.c_str());
 		system_args("ln -s \"%s\" \"%s\"", fakeImg, m_boot_dev.c_str());
 	}
-
 	#endif
 
 	return true;
@@ -3020,26 +3129,29 @@ bool MultiROM::fakeBootPartition(const char *fakeImg)
 
 void MultiROM::restoreBootPartition()
 {
-#ifdef BOARD_BOOTIMAGE_PARTITION_SIZE
-	if(access(m_boot_dev.c_str(), F_OK) == 0)
-	{
-		LOGINFO("Truncating fake boot.img to %d bytes\n", BOARD_BOOTIMAGE_PARTITION_SIZE);
-		truncate(m_boot_dev.c_str(), BOARD_BOOTIMAGE_PARTITION_SIZE);
-	}
-#endif
-
-	if(access((m_boot_dev + "-orig").c_str(), F_OK) < 0)
-	{
+	if (access((m_boot_dev + "-orig").c_str(), F_OK) < 0) {
 		gui_print("Failed to restore boot partition, %s-orig does not exist!\n", m_boot_dev.c_str());
 		return;
 	}
 
 #ifdef BOARD_BOOTIMAGE_PARTITION_SIZE
-	int minor = BOOTIMG_LOOP_MINOR;  // MINOR = non-existent /dev/block/loopN
-	std::string loob_block_device = "/dev/block/loop" + TWFunc::to_string(BOOTIMG_LOOP_MINOR);
-	system_args("losetup -d \"%s\"", m_boot_dev.c_str());        // release loop device
-	system_args("losetup -d \"%s\"", loob_block_device.c_str()); // release loop device
-	system_args("rm \"%s\"", loob_block_device.c_str());         // delete /dev/block/loopN
+	struct stat info;
+	if (stat(m_boot_dev.c_str(), &info) < 0) {
+		LOGERR("Couldn't stat %s\n", m_boot_dev.c_str());
+	}
+	else if (S_ISBLK(info.st_mode)) {
+		std::string loop_device = "/dev/block/loop" + TWFunc::to_string(minor(info.st_rdev));
+		system_args("rm \"%s\"", loop_device.c_str()); // delete the dummy entry
+		system_args("mv \"%s\" \"%s\"", m_boot_dev.c_str(), loop_device.c_str()); // restore its original location
+		Release_LoopDevice(loop_device, true);
+	}
+	else {
+		LOGINFO("Truncating fake boot.img to %d bytes\n", BOARD_BOOTIMAGE_PARTITION_SIZE);
+		truncate(m_boot_dev.c_str(), BOARD_BOOTIMAGE_PARTITION_SIZE);
+	}
+#else
+	LOGINFO("Truncating fake boot.img to %d bytes\n", BOARD_BOOTIMAGE_PARTITION_SIZE);
+	truncate(m_boot_dev.c_str(), BOARD_BOOTIMAGE_PARTITION_SIZE);
 #endif
 	system_args("rm \"%s\"", m_boot_dev.c_str());
 	system_args("mv \"%s\"-orig \"%s\"", m_boot_dev.c_str(), m_boot_dev.c_str());
@@ -3508,4 +3620,143 @@ std::string MultiROM::getRecoveryVersion()
 	}
 
 	return res;
+}
+
+
+#define MAX_LOOP_NUM 1023
+#define MULTIROM_LOOP_NUM_START   231
+
+std::string MultiROM::Create_LoopDevice(const std::string& ImageFile)
+{
+	std::string LoopDevice;
+	char dev_path[64];
+	int device_fd = -1;
+	int file_fd = -1;
+	int loop_num;
+	struct stat info;
+	struct loop_info64 lo_info;
+
+/*
+ * Alternate method to truncating (see below)
+ *
+	// LO_NAME_SIZE is only 64 chars, so symlink and mount from /mnt_mrom_img instead
+	string srcImageFile = ImageFile;
+	if (srcImageFile.length() >= LO_NAME_SIZE) {
+		mkdir("/mnt_mrom_img", 0777);
+		std::string Image_Symlink = "/mnt_mrom_img/" + TWFunc::Get_Filename(srcImageFile);
+		symlink(srcImageFile.c_str(), Image_Symlink.c_str());
+		srcImageFile = Image_Symlink;
+	}
+*/
+	string srcImageFile = ImageFile;
+
+	file_fd = open(srcImageFile.c_str(), O_RDWR | O_CLOEXEC);
+	if (file_fd < 0) {
+		LOGINFO("Failed to open image %s\n", srcImageFile.c_str());
+		return "";
+	}
+
+	// Find unused loop device starting at MULTIROM_LOOP_NUM_START
+	for (loop_num = MULTIROM_LOOP_NUM_START; loop_num < MAX_LOOP_NUM; ++loop_num) {
+		sprintf(dev_path, "/dev/block/loop%d", loop_num);
+		if (stat(dev_path, &info) < 0) {
+			if(errno == ENOENT)
+				break;
+		} else if (S_ISBLK(info.st_mode) && (device_fd = open(dev_path, O_RDWR | O_CLOEXEC)) >= 0) {
+			int ioctl_res = ioctl(device_fd, LOOP_GET_STATUS64, &lo_info);
+			close(device_fd);
+
+			if (ioctl_res < 0 && errno == ENXIO)
+				break;
+		}
+	}
+
+	if (loop_num == MAX_LOOP_NUM) {
+		LOGINFO("Failed to find suitable loop device number!\n");
+		goto createLoopDevice_exit;
+	}
+
+	LOGINFO("Create_loop_device: loop_num = %d\n", loop_num);
+
+	if (mknod(dev_path, S_IFBLK | 0777, makedev(7, loop_num)) < 0) {
+		if (errno != EEXIST) {
+			LOGINFO("Failed to create loop file (%d: %s)\n", errno, strerror(errno));
+			goto createLoopDevice_exit;
+		} else
+			LOGINFO("Loop file %s already exists, using it.\n", dev_path);
+	}
+
+	device_fd = open(dev_path, O_RDWR | O_CLOEXEC);
+	if (device_fd < 0) {
+		LOGINFO("Failed to open loop file (%d: %s)\n", errno, strerror(errno));
+		goto createLoopDevice_exit;
+	}
+
+	memset(&lo_info, 0, sizeof(lo_info));
+	if (ioctl(device_fd, LOOP_GET_STATUS64, &lo_info) < 0 && errno != ENXIO) {
+		LOGINFO("ioctl LOOP_GET_STATUS64 failed on %s (%d: %s)\n", dev_path, errno, strerror(errno));
+		goto createLoopDevice_exit;
+	}
+
+	if (ioctl(device_fd, LOOP_SET_FD, file_fd) < 0) {
+		LOGINFO("ioctl LOOP_SET_FD failed on %s (%d: %s)\n", dev_path, errno, strerror(errno));
+		goto createLoopDevice_exit;
+	}
+
+	// LO_NAME_SIZE is only 64 chars, so just use the last 63 chars
+	// (see alternative at the beginning of this function)
+	if (srcImageFile.length() >= LO_NAME_SIZE)
+		strncpy((char *)lo_info.lo_file_name, srcImageFile.substr(srcImageFile.length() - LO_NAME_SIZE + 1).c_str(), LO_NAME_SIZE);
+	else
+		strncpy((char *)lo_info.lo_file_name, srcImageFile.c_str(), LO_NAME_SIZE);
+
+	if (ioctl(device_fd, LOOP_SET_STATUS64, &lo_info) < 0) {
+		LOGINFO("ioctl LOOP_SET_STATUS64 failed on %s (%d: %s)\n", dev_path, errno, strerror(errno));
+		goto createLoopDevice_exit;
+	}
+
+	LoopDevice = dev_path;
+
+createLoopDevice_exit:
+	if (device_fd >= 0) close(device_fd);
+	if (file_fd >= 0) close(file_fd);
+
+	return LoopDevice;
+}
+
+bool MultiROM::Release_LoopDevice(const std::string& LoopDevice, bool DeleteNode)
+{
+	if (LoopDevice.empty())
+		return false;
+
+	int device_fd;
+	device_fd = open(LoopDevice.c_str(), O_RDWR | O_CLOEXEC);
+	if (device_fd < 0) {
+		LOGINFO("Failed to open loop file (%d: %s)\n", errno, strerror(errno));
+		return false;
+	}
+
+	if (ioctl(device_fd, LOOP_CLR_FD) < 0) {
+		LOGINFO("ioctl LOOP_CLR_FD failed on %s (%d: %s)\n", LoopDevice.c_str(), errno, strerror(errno));
+		close(device_fd);
+		return false;
+	}
+	close(device_fd);
+
+	if (DeleteNode) {
+		unlink(LoopDevice.c_str());
+		LOGINFO("Deleted loop device %s\n", LoopDevice.c_str());
+		//LoopDevice.clear();
+	}
+
+/*
+ * Alternate method to truncating, refer to Create_LoopDevice()
+ *
+	// If we symlinked earlier delete it
+	std::string Image_Symlink = "/mnt_mrom_img/" + TWFunc::Get_Filename(Primary_Block_Device);
+	unlink(Image_Symlink.c_str());
+	rmdir("/mnt_mrom_img");
+*/
+
+	return true;
 }

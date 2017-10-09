@@ -192,11 +192,6 @@ private:
 	bool Flash_Image_FI(const string& Filename, ProgressTracking *progress);  // Flashes an image to the partition using flash_image for mtd nand
 	void ExcludeAll(const string& path);                                      // Adds an exclusion for path to both the backup and wipe exclusion lists
 
-#ifdef TARGET_RECOVERY_IS_MULTIROM
-private:
-	string Get_Mount_Options_With_Defaults();                                 // Takes Mount_Options, ensures FS-specific defaults are in it and returns it
-#endif //TARGET_RECOVERY_IS_MULTIROM
-
 private:
 	bool Can_Be_Mounted;                                                      // Indicates that the partition can be mounted
 	bool Can_Be_Wiped;                                                        // Indicates that the partition can be wiped
@@ -257,6 +252,7 @@ private:
 private:
 	string Bind_Of;                                                           // Path to partition which is this partition bound to
 	bool Is_ImageMount;                                                       // This is true if the partition is on .img file
+	string Loop_Device;                                                       // Path to loop device (/dev/block/loopNNN)
 #endif //TARGET_RECOVERY_IS_MULTIROM
 
 friend class TWPartitionManager;
@@ -328,8 +324,6 @@ public:
 	bool Remove_MTP_Storage(string Mount_Point);                              // Adds or removes an MTP Storage partition
 	bool Remove_MTP_Storage(unsigned int Storage_ID);                         // Adds or removes an MTP Storage partition
 #ifdef TARGET_RECOVERY_IS_MULTIROM
-	void Update_Storage_Sizes();
-
 	const std::vector<TWPartition*>& getPartitions() const { return Partitions; }
 	std::vector<TWPartition*>& getPartitions() { return Partitions; }
 	bool Push_Context();
